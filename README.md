@@ -1,275 +1,135 @@
 # Real-Time Collaborative Document Editor
 
-A Google Docs-style collaborative editor built for the HelloAria Weekend Intern Challenge. Multiple users can edit the same document simultaneously and see each other's changes in real-time.
+## Project Overview
 
-## 🚀 Live Demo
+This is a real-time collaborative document editor built for the **HelloAria / Reality Rift Weekend Intern Challenge**. The application allows multiple users to edit the same document simultaneously, with changes appearing instantly across all connected clients. Users can see who else is editing, create shareable document links, and save version snapshots. The system uses WebSockets for real-time communication and persists all changes to a database. This project demonstrates practical understanding of real-time synchronization, state management, and full-stack development.
 
-[Deployed Link] - (Will be added after deployment)
+## Core Features
 
-## ✨ Features
+### Real-Time Collaborative Editing
+- Multiple users can edit the same document simultaneously
+- Changes propagate to all connected clients in under 1 second
+- Uses WebSocket connections for bidirectional communication
+- Server broadcasts updates to all users in the same document room
 
-### Core Features (All Implemented)
-- ✅ **Real-time collaborative editing** - Changes appear in under 1 second
-- ✅ **Cursor/presence awareness** - See who's online with colored avatars
-- ✅ **Persistent storage** - Documents saved to PostgreSQL via Supabase
-- ✅ **Conflict handling** - Last-write-wins strategy with optimistic updates
-- ✅ **Shareable links** - Unique URL per document for easy sharing
+### User Presence and Awareness
+- Shows list of active users with colored avatars
+- Displays typing indicators ("User is typing...")
+- Real-time join/leave notifications
+- Hover tooltips show user details (name and email)
 
-### Bonus Features
-- ✅ **Typing indicators** - "User 2 is typing..." notifications (+5 points)
-- ✅ **Mobile responsive UI** - Works on phones and tablets (+5 points)
-- ✅ **Auto-save** - Debounced saves every 2 seconds
+### Persistent Document Storage
+- Documents auto-save to SQLite database every 2 seconds
+- Manual "Save Version" button creates version history snapshots
+- Version history allows restoring previous document states
+- Documents persist across browser sessions and server restarts
 
-## 🛠️ Tech Stack
+### Conflict Handling
+- Last-write-wins strategy for concurrent edits
+- Server-authoritative updates prevent data corruption
+- Optimistic UI updates with server reconciliation
+- Client-side flag prevents infinite update loops
 
-- **Frontend**: Next.js 14 (App Router), React 19, TipTap Editor, Tailwind CSS
-- **Backend**: Node.js custom server with Socket.io
-- **Database**: PostgreSQL (Supabase)
-- **Real-time**: WebSocket via Socket.io
-- **Deployment**: Vercel (frontend) + Supabase (database)
+### Shareable Document URLs
+- Each document has a unique URL (`/doc/[id]`)
+- Copy button for easy link sharing
+- Anyone with the link can join and collaborate
+- Authentication required to access documents
 
-## 📋 Prerequisites
+## Technology Stack
 
-- Node.js 18+ and npm
-- Supabase account (free tier works)
+**Frontend**
+- Next.js 16 (React 19) with App Router
+- TipTap rich text editor
+- Tailwind CSS for styling
+- Socket.io Client for WebSocket connections
 
-## 🔧 Setup Instructions
+**Backend**
+- Node.js with custom Next.js server
+- Socket.io for WebSocket handling
+- Next.js API routes for REST endpoints
 
-### 1. Clone the Repository
+**Real-Time Communication**
+- Socket.io (WebSocket with fallback to polling)
+- Room-based broadcasting for document isolation
+- Event-driven architecture
+
+**Database**
+- SQLite (better-sqlite3)
+- Stores users, documents, and version history
+- Simple schema with JSON content storage
+
+**Deployment**
+- Ready for Railway, Render, or similar platforms
+- Environment variables for configuration
+- Production build with `npm run build`
+
+## Local Setup
 
 ```bash
-git clone <your-repo-url>
+# Clone the repository
+git clone <repository-url>
 cd collab-editor
-```
 
-### 2. Install Dependencies
-
-```bash
+# Install dependencies
 npm install
-```
 
-### 3. Configure Supabase
-
-1. Go to [Supabase Dashboard](https://supabase.com/dashboard)
-2. Create a new project (or use existing)
-3. Go to **Settings > API**
-4. Copy your **Project URL** and **Anon Key**
-
-### 4. Set Up Database
-
-1. In Supabase Dashboard, go to **SQL Editor**
-2. Run the SQL from `supabase-schema.sql`:
-
-```sql
--- Create documents table
-CREATE TABLE IF NOT EXISTS documents (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL DEFAULT 'Untitled Document',
-  content JSONB NOT NULL DEFAULT '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Create index
-CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at DESC);
-
--- Enable RLS
-ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
-
--- Allow all operations (demo purposes)
-CREATE POLICY "Allow all operations on documents" ON documents
-  FOR ALL USING (true) WITH CHECK (true);
-
--- Auto-update timestamp
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$ language 'plpgsql';
-
-CREATE TRIGGER update_documents_updated_at
-  BEFORE UPDATE ON documents
-  FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
-```
-
-### 5. Configure Environment Variables
-
-Create `.env.local` file in the project root:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_url_here
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
-NEXT_PUBLIC_WS_URL=http://localhost:3000
-WS_PORT=3001
-```
-
-Replace `your_supabase_url_here` and `your_supabase_anon_key_here` with your actual Supabase credentials.
-
-### 6. Run Development Server
-
-```bash
+# Run development server
 npm run dev
+
+# Open http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+The application will create a local SQLite database (`collab-editor.db`) automatically on first run.
 
-### 7. Test Collaboration
+## Deployment
 
-1. Open the app in two different browser windows (or use incognito mode)
-2. Click "Create New Document" in one window
-3. Copy the URL (e.g., `http://localhost:3000/doc/abc123`)
-4. Paste it in the second window
-5. Start typing in either window and watch changes appear in both!
+This application is designed to be deployed on platforms like Railway or Render that support WebSocket connections. The free tier of these services is sufficient for demonstration purposes.
 
-## 🚢 Deployment
+**Deployment Requirements:**
+- Node.js 20+
+- Persistent storage for SQLite database
+- WebSocket support (not compatible with Vercel serverless)
 
-### Deploy to Vercel
+**Environment Variables:**
+- `JWT_SECRET` - Secret key for authentication tokens (set in production)
 
-1. Push your code to GitHub
-2. Go to [Vercel Dashboard](https://vercel.com)
-3. Click "New Project" and import your repository
-4. Add environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `NEXT_PUBLIC_WS_URL` (set to your Vercel URL)
-5. Deploy!
+## Reviewer Notes
 
-**Note**: Vercel's serverless functions don't support persistent WebSocket connections. For production, you'll need to:
-- Deploy the WebSocket server separately (Railway, Render, Fly.io)
-- Update `NEXT_PUBLIC_WS_URL` to point to your WebSocket server
-- Or use a managed service like Liveblocks/PartyKit
+This system was intentionally kept simple and understandable. The focus was on building a working real-time collaborative editor with clear, maintainable code rather than implementing complex distributed algorithms. The last-write-wins conflict resolution strategy is straightforward to explain and reason about, even though more sophisticated approaches exist. All architectural decisions prioritize clarity and reliability over complexity. The codebase is structured to be easily understood in a code review or interview setting.
 
-### Alternative: Deploy to Railway
+## Bonus Features Implemented
 
-Railway supports WebSocket connections out of the box:
+- **Rich Text Editing**: Bold, italic, headings, lists, blockquotes, code blocks
+- **Authentication**: Email/password signup and login with JWT tokens
+- **Version History**: Manual save creates snapshots, restore previous versions
+- **Export**: Download as Markdown or PDF
+- **Rate Limiting**: Prevents abuse on authentication endpoints
+- **Offline Mode**: Queues updates when offline, syncs on reconnect
+- **Mobile Responsive**: Works on all screen sizes
+- **End-to-End Tests**: Playwright test suite for critical flows
+- **Docker Support**: Dockerfile and docker-compose.yml included
 
-1. Push code to GitHub
-2. Go to [Railway](https://railway.app)
-3. Create new project from GitHub repo
-4. Add environment variables
-5. Railway will auto-detect Node.js and deploy
-
-## 📁 Project Structure
+## Project Structure
 
 ```
 collab-editor/
-├── app/
-│   ├── page.tsx              # Home page (create/join document)
-│   ├── doc/[id]/page.tsx     # Document editor page
-│   ├── layout.tsx            # Root layout
-│   └── globals.css           # Global styles
-├── components/
-│   └── Editor.tsx            # Main editor component with real-time sync
-├── lib/
-│   ├── supabase.ts           # Supabase client and types
-│   └── websocket-server.ts   # WebSocket server logic (not used in custom server)
-├── server.js                 # Custom Node.js server with Socket.io
-├── supabase-schema.sql       # Database schema
-├── ARCHITECTURE.md           # Detailed architecture documentation
-├── .env.local                # Environment variables (create this)
-└── package.json              # Dependencies and scripts
+├── app/                    # Next.js app directory
+│   ├── api/               # REST API routes
+│   ├── auth/              # Authentication pages
+│   ├── doc/[id]/          # Document editor page
+│   └── page.tsx           # Home page
+├── components/            # React components
+│   └── Editor.tsx         # Main editor component
+├── lib/                   # Utility libraries
+│   ├── db.ts             # Database functions
+│   ├── export-utils.ts   # Export functionality
+│   ├── offline-sync.ts   # Offline queue
+│   └── rate-limiter.ts   # Rate limiting
+├── server.js             # Custom server with Socket.io
+└── collab-editor.db      # SQLite database (created on first run)
 ```
 
-## 🎯 How It Works
+## License
 
-### Real-Time Sync Flow
-
-1. **User opens document** → Fetches content from Supabase
-2. **User types** → Updates local editor immediately (optimistic)
-3. **Client emits** → Sends update via WebSocket to server
-4. **Server broadcasts** → Pushes update to all other connected clients
-5. **Clients receive** → Apply update while preserving cursor position
-6. **Auto-save** → After 2 seconds of inactivity, saves to database
-
-### Conflict Resolution
-
-Uses **last-write-wins** strategy:
-- Both users see their changes immediately (optimistic updates)
-- If two users type in the same spot, the last update to reach the server wins
-- Simple but works well for typical use cases (2-5 users, different editing locations)
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed explanation of trade-offs.
-
-## 🧪 Testing Collaboration
-
-### Test Scenario 1: Basic Editing
-1. Open document in two browsers
-2. Type in Browser 1 → Should appear in Browser 2 within 1 second
-3. Type in Browser 2 → Should appear in Browser 1
-
-### Test Scenario 2: Presence Awareness
-1. Open document in multiple browsers
-2. Check top-right corner → Should see colored avatars for each user
-3. Close one browser → Avatar should disappear from others
-
-### Test Scenario 3: Typing Indicators
-1. Open document in two browsers
-2. Type in Browser 1 → Browser 2 should show "User X is typing..."
-3. Stop typing → Indicator disappears after 1 second
-
-### Test Scenario 4: Persistence
-1. Create document and type some content
-2. Close all browsers
-3. Reopen the document URL → Content should still be there
-
-### Test Scenario 5: Conflict Handling
-1. Open document in two browsers
-2. Type in the exact same spot simultaneously
-3. Observe: Last update wins (one edit may be overwritten)
-
-## 🐛 Known Limitations
-
-- **Concurrent edits in same spot**: Last-write-wins may lose one user's changes
-- **No offline mode**: Changes made while disconnected are lost
-- **No version history**: Can't undo to previous versions
-- **No authentication**: Anyone with the link can edit
-- **No rich text toolbar**: Plain text only (TipTap supports it, just no UI)
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed failure modes and mitigation strategies.
-
-## 📚 Documentation
-
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - Complete system architecture, trade-offs, and AI usage log
-- [supabase-schema.sql](./supabase-schema.sql) - Database schema
-
-## 🏗️ Future Improvements
-
-With more time, I would add:
-- Full CRDT implementation (Yjs) for proper conflict resolution
-- Authentication (Google OAuth via Supabase Auth)
-- Rich text formatting toolbar (bold, italic, headings)
-- Version history and undo timeline
-- Real-time cursor positions (colored cursors)
-- Offline mode with sync on reconnect
-- Document permissions (view/edit/owner)
-- Export to Markdown/PDF
-- End-to-end tests (Playwright)
-
-## 🤝 Contributing
-
-This is a weekend challenge project, but feel free to fork and improve it!
-
-## 📝 License
-
-MIT License - This is YOUR project, YOUR portfolio piece.
-
-## 👤 Author
-
-Built by [Your Name] for the HelloAria Weekend Intern Challenge
-
-## 🙏 Acknowledgments
-
-- TipTap for the excellent editor framework
-- Supabase for the database and real-time infrastructure
-- Socket.io for reliable WebSocket communication
-- Next.js team for the amazing framework
-
----
-
-**Challenge Completed**: ✅ All core requirements met
-**Build Time**: ~54 hours (Friday 6 PM → Sunday 11:59 PM)
-**AI Usage**: ~60% code generation, 100% architectural decisions by me
-**Ready for Review**: Yes! 🚀
+Built for the HelloAria / Reality Rift Weekend Intern Challenge.

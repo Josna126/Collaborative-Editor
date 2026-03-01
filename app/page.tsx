@@ -1,12 +1,58 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 
 export default function Home() {
   const [documentId, setDocumentId] = useState('');
   const [error, setError] = useState('');
+  const [user, setUser] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const router = useRouter();
+
+  useEffect(() => {
+    // Check authentication
+    const checkAuth = async () => {
+      const token = localStorage.getItem('auth_token');
+      const userStr = localStorage.getItem('user');
+
+      if (!token || !userStr) {
+        router.push('/auth');
+        return;
+      }
+
+      try {
+        // Verify token
+        const response = await fetch('/api/auth/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+
+        if (!response.ok) {
+          localStorage.removeItem('auth_token');
+          localStorage.removeItem('user');
+          router.push('/auth');
+          return;
+        }
+
+        const data = await response.json();
+        setUser(data.user);
+        setLoading(false);
+      } catch (err) {
+        console.error('Auth check failed:', err);
+        router.push('/auth');
+      }
+    };
+
+    checkAuth();
+  }, [router]);
+
+  const handleSignOut = async () => {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('user');
+    router.push('/auth');
+  };
 
   const createNewDocument = () => {
     const newId = Math.random().toString(36).substring(2, 15);
@@ -30,15 +76,38 @@ export default function Home() {
     router.push(`/doc/${documentId.trim()}`);
   };
 
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  const fullName = user?.full_name || 'User';
+  const firstName = fullName.split(' ')[0];
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
       <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">
-            Collaborative Editor
-          </h1>
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-4xl font-bold text-gray-900">
+              Collaborative Editor
+            </h1>
+            <button
+              onClick={handleSignOut}
+              className="text-sm text-gray-600 hover:text-gray-800"
+              title="Sign out"
+            >
+              Sign out
+            </button>
+          </div>
           <p className="text-gray-600">
-            Real-time document editing with your team
+            Welcome back, {firstName}!
           </p>
         </div>
 

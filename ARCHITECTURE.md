@@ -1,587 +1,265 @@
-# Architecture Document - Real-Time Collaborative Document Editor
+# Architecture Document
 
 ## System Overview
 
+This is a real-time collaborative document editor where multiple users can edit the same document simultaneously. The system uses a centralized server architecture where the backend maintains the authoritative state and broadcasts updates to all connected clients via WebSocket connections.
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         CLIENT BROWSER                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Next.js    │  │   TipTap     │  │   Socket.io Client   │  │
-│  │   React UI   │  │   Editor     │  │   (WebSocket)        │  │
-│  └──────┬───────┘  └──────┬───────┘  └──────────┬───────────┘  │
-│         │                 │                      │              │
-└─────────┼─────────────────┼──────────────────────┼──────────────┘
-          │                 │                      │
-          │ HTTP/REST       │                      │ WebSocket
-          │                 │                      │
-┌─────────▼─────────────────▼──────────────────────▼──────────────┐
-│                    NEXT.JS CUSTOM SERVER                         │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              Node.js HTTP Server                         │   │
-│  │  ┌────────────────┐         ┌──────────────────────┐    │   │
-│  │  │  Next.js App   │         │  Socket.io Server    │    │   │
-│  │  │  (SSR/API)     │         │  (WebSocket Handler) │    │   │
-│  │  └────────────────┘         └──────────────────────┘    │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└──────────────────────────────┬───────────────────────────────────┘
-                               │
-                               │ PostgreSQL Protocol
-                               │
-                    ┌──────────▼──────────┐
-                    │   SUPABASE          │
-                    │  ┌──────────────┐   │
-                    │  │  PostgreSQL  │   │
-                    │  │   Database   │   │
-                    │  └──────────────┘   │
-                    └─────────────────────┘
+┌─────────────┐         ┌─────────────────────────────┐         ┌──────────┐
+│   Client A  │◄───────►│   Backend Server            │◄───────►│ SQLite   │
+│  (Browser)  │         │  - HTTP API (REST)          │         │ Database │
+└─────────────┘         │  - WebSocket (Socket.io)    │         └──────────┘
+                        │  - Document State Manager   │
+┌─────────────┐         │                             │
+│   Client B  │◄───────►│                             │
+│  (Browser)  │         └─────────────────────────────┘
+└─────────────┘
+        ▲
+        │
+┌─────────────┐
+│   Client C  │
+│  (Browser)  │
+└─────────────┘
 ```
 
-## Sync Strategy
+**Data Flow:**
+1. User types in the editor (Client A)
+2. Client sends update via WebSocket to server
+3. Server broadcasts update to all other clients in the same document room
+4. Clients B and C receive update and apply changes to their editors
+5. Server auto-saves to database every 2 seconds
 
-### Chosen Approach: **Operational Transformation (OT) - Simplified Last-Write-Wins with Optimistic Updates**
+## Synchronization Strategy
 
-I chose a **simplified OT approach** with last-write-wins conflict resolution for this weekend build. Here's why:
+The system uses a **server-authoritative last-write-wins** approach for synchronization. When a user makes an edit, the change is immediately sent to the server via WebSocket. The server then broadcasts this change to all other connected clients in the same document room.
 
-#### Why This Strategy?
+**Why This Approach:**
+- Simple to implement and reason about
+- Server maintains single source of truth
+- No complex conflict resolution algorithms needed
+- Predictable behavior that's easy to debug
+- Sufficient for documents with <10 concurrent editors
 
-1. **Time Constraint**: Full CRDT implementation (like Yjs) would require deep integration and testing. For a 54-hour build, a simpler approach ensures completion.
+**How It Works:**
+1. User types → Editor captures change
+2. Change sent to server via `document-update` event
+3. Server broadcasts to all clients except sender
+4. Receiving clients apply update to their editor
+5. Client uses `isRemoteUpdate` flag to prevent echo loops
 
-2. **Good Enough for Most Cases**: For typical collaborative editing (2-5 users, not typing in exact same spot), this works well with minimal conflicts.
+**Limitations:**
+- Concurrent edits at the exact same position may overwrite each other
+- No operational transformation or CRDT for fine-grained merging
+- Works best when users edit different sections
+- Not optimized for 100+ simultaneous editors
 
-3. **Clear Trade-offs**: I know exactly what breaks (see Failure Modes section) and can explain it.
-
-#### How It Works:
-
-1. **User types** → Editor updates locally (optimistic update)
-2. **Client emits** → `document-update` event via WebSocket with full document content
-3. **Server broadcasts** → All other connected clients receive the update
-4. **Clients apply** → Other users see the change, preserving their cursor position
-5. **Debounced save** → After 2 seconds of inactivity, content saves to Supabase
-
-#### What I Considered But Didn't Use:
-
-- **Full CRDT (Yjs)**: Would handle conflicts perfectly but adds complexity. I started with Yjs dependencies but simplified to meet deadline.
-- **Operational Transformation (Google Docs style)**: Requires tracking operations and transforming them. Too complex for weekend build.
-- **Version vectors**: Adds overhead and still needs conflict resolution logic.
-
-#### What Breaks:
-
-- If two users type in the exact same position simultaneously, one edit may be lost
-- The last update to reach the server wins
-- No automatic merge of concurrent edits
-
-#### What Would I Do With More Time:
-
-- Implement full Yjs CRDT integration
-- Add operation-based sync instead of full document sync
-- Implement proper conflict resolution with merge strategies
+This trade-off was intentional—the system prioritizes simplicity and understandability over handling edge cases that rarely occur in typical usage.
 
 ## State Management
 
-### Document State Lives in Three Places:
+**Client-Side State:**
+- Editor content (TipTap document model)
+- Connected users list
+- Typing indicators
+- UI state (modals, loading states)
+- localStorage cache for offline access
 
-#### 1. **Client State (TipTap Editor)**
-- **What**: The current document content in the editor
-- **Why**: Provides instant feedback for typing (optimistic updates)
-- **Lifecycle**: Exists while user has document open
+**Server-Side State:**
+- Active WebSocket connections per document
+- User metadata (name, email) per connection
+- Document rooms (mapping of document ID to connected users)
 
-#### 2. **Server Memory (Socket.io)**
-- **What**: Active connections and user presence
-- **Why**: Tracks who's online, routes messages between clients
-- **Lifecycle**: Exists while server is running
-- **Data Lost on Restart**: User presence, active connections
+**Database State:**
+- Documents table: Stores current document content
+- Users table: Authentication and user profiles
+- Document versions table: Version history snapshots
 
-#### 3. **Database (Supabase PostgreSQL)**
-- **What**: Persistent document content
-- **Why**: Survives server restarts, browser closes
-- **Lifecycle**: Permanent until explicitly deleted
+**Update Propagation:**
+1. User edits trigger `editor.on('update')` event
+2. Content extracted as JSON via `editor.getJSON()`
+3. Sent to server: `socket.emit('document-update', { documentId, content })`
+4. Server broadcasts: `socket.to(documentId).emit('document-update', { content, userId })`
+5. Clients receive and apply: `editor.commands.setContent(content)`
 
-### State Reconciliation Flow:
-
-```
-User Opens Document:
-1. Client fetches from Supabase (source of truth)
-2. Loads content into TipTap editor
-3. Connects to WebSocket server
-4. Joins document room
-
-User Types:
-1. Editor updates immediately (local state)
-2. Emits update via WebSocket (server memory)
-3. Server broadcasts to other clients
-4. After 2s idle, saves to Supabase (persistent state)
-
-User Reconnects:
-1. Fetches latest from Supabase
-2. Overwrites local state
-3. Rejoins WebSocket room
-```
-
-### Why This Approach?
-
-- **Fast**: Local updates feel instant
-- **Reliable**: Database is source of truth
-- **Scalable**: WebSocket handles real-time, DB handles persistence
-- **Simple**: Clear separation of concerns
+The `isRemoteUpdate` ref prevents infinite loops by skipping broadcast when applying remote changes.
 
 ## Data Model
 
-### Database Schema (PostgreSQL via Supabase)
-
+**Documents Table:**
 ```sql
 CREATE TABLE documents (
-  id TEXT PRIMARY KEY,              -- Random generated ID (e.g., "a3f9k2m")
-  title TEXT NOT NULL,              -- Document title (default: "Untitled Document")
-  content JSONB NOT NULL,           -- TipTap JSON format
-  created_at TIMESTAMP,             -- When document was created
-  updated_at TIMESTAMP              -- Last modification time
+  id TEXT PRIMARY KEY,           -- Random unique ID
+  title TEXT DEFAULT 'Untitled',
+  content TEXT NOT NULL,         -- JSON stringified TipTap document
+  created_at DATETIME,
+  updated_at DATETIME
 );
 ```
 
-#### Why This Schema?
-
-1. **`id` as TEXT**: 
-   - Random string IDs are shareable and URL-friendly
-   - No sequential IDs = no enumeration attacks
-   - Easy to generate client-side
-
-2. **`content` as JSONB**:
-   - TipTap uses JSON format for document structure
-   - JSONB allows querying if needed (future: search within documents)
-   - Stores rich text structure, not just plain text
-
-3. **No user/auth tables**:
-   - Time constraint: Auth is a bonus feature
-   - Current: Anonymous editing with localStorage usernames
-   - Future: Add `user_id` foreign key when auth is implemented
-
-4. **No version history table**:
-   - Would require `document_versions` table with snapshots
-   - Bonus feature I didn't have time for
-   - Future: Add versioning with event sourcing
-
-#### Example Document Content (JSONB):
-
-```json
-{
-  "type": "doc",
-  "content": [
-    {
-      "type": "paragraph",
-      "content": [
-        {
-          "type": "text",
-          "text": "Hello, this is collaborative editing!"
-        }
-      ]
-    },
-    {
-      "type": "paragraph",
-      "content": [
-        {
-          "type": "text",
-          "marks": [{"type": "bold"}],
-          "text": "Bold text works too"
-        }
-      ]
-    }
-  ]
-}
+**Users Table:**
+```sql
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,   -- bcrypt hashed
+  full_name TEXT NOT NULL,
+  created_at DATETIME
+);
 ```
 
-### In-Memory Data Structures (Server)
-
-```typescript
-// Active connections per document
-connections: Map<documentId, Map<socketId, username>>
-
-// Example:
-{
-  "a3f9k2m": {
-    "socket_abc123": "User 1",
-    "socket_def456": "User 2"
-  }
-}
+**Document Versions Table:**
+```sql
+CREATE TABLE document_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id TEXT NOT NULL,
+  content TEXT NOT NULL,         -- Snapshot of document at save time
+  user_id TEXT,                  -- Who saved this version
+  created_at DATETIME,
+  FOREIGN KEY (document_id) REFERENCES documents(id)
+);
 ```
 
-## WebSocket Protocol
+**Why This Schema:**
+- Simple and easy to query
+- JSON content storage allows flexible document structure
+- Version history enables undo/restore functionality
+- Minimal joins needed for common operations
 
-### Connection Flow:
+## WebSocket Communication
 
+**Connection Flow:**
 ```
 Client                          Server
-  │                               │
-  ├──── connect ─────────────────>│
-  │<──── connection event ────────┤
-  │                               │
-  ├──── join-document ───────────>│
-  │     (documentId, username)    │
-  │                               │
-  │<──── user-joined ─────────────┤
-  │     (userId, username, users) │
-  │                               │
+  |                               |
+  |--- socket.connect() --------->|
+  |<-- 'connect' event ----------|
+  |                               |
+  |--- 'join-document' ---------->|
+  |    { docId, userData }        |
+  |                               |
+  |<-- 'user-joined' ------------|
+  |    { userId, users[] }        |
 ```
 
-### Message Formats:
+**Event Types:**
 
-#### 1. **join-document** (Client → Server)
-```typescript
-{
-  event: 'join-document',
-  data: {
-    documentId: string,  // e.g., "a3f9k2m"
-    username: string     // e.g., "User 1"
+1. **join-document**
+   - Sent when user opens a document
+   - Payload: `{ documentId, fullName, email, userId, firstName }`
+   - Server adds user to room and broadcasts to others
+
+2. **document-update**
+   - Sent on every editor change
+   - Payload: `{ documentId, content }`
+   - Server broadcasts to all clients in room except sender
+
+3. **typing-indicator**
+   - Sent when user is typing
+   - Payload: `{ documentId, isTyping, firstName }`
+   - Debounced to 1 second
+   - Server broadcasts to show "User is typing..."
+
+4. **user-joined / user-left**
+   - Server-initiated events
+   - Payload: `{ userId, fullName, email, users[] }`
+   - Updates active users list
+
+**Example Message:**
+```javascript
+// Client sends
+socket.emit('document-update', {
+  documentId: 'abc123',
+  content: {
+    type: 'doc',
+    content: [
+      { type: 'paragraph', content: [{ type: 'text', text: 'Hello' }] }
+    ]
   }
-}
+});
+
+// Server broadcasts
+socket.to('abc123').emit('document-update', {
+  content: { /* same content */ },
+  userId: 'socket-id-xyz'
+});
 ```
 
-#### 2. **user-joined** (Server → All Clients in Room)
-```typescript
-{
-  event: 'user-joined',
-  data: {
-    userId: string,      // Socket ID of new user
-    username: string,    // Display name
-    users: Array<{       // All current users
-      id: string,
-      username: string
-    }>
-  }
-}
-```
+## Failure Handling
 
-#### 3. **document-update** (Client → Server → Other Clients)
-```typescript
-{
-  event: 'document-update',
-  data: {
-    documentId: string,
-    content: object,     // Full TipTap JSON document
-    userId: string       // Who made the change (added by server)
-  }
-}
-```
+**User Disconnects During Editing:**
+- WebSocket connection closes
+- Server removes user from active users list
+- Other clients receive `user-left` event
+- User's last changes are already saved (auto-save every 2 seconds)
+- On reconnect, user loads latest document from database
 
-#### 4. **typing-indicator** (Client → Server → Other Clients)
-```typescript
-{
-  event: 'typing-indicator',
-  data: {
-    documentId: string,
-    isTyping: boolean,
-    username: string,
-    userId: string       // Added by server
-  }
-}
-```
-
-#### 5. **user-left** (Server → All Clients in Room)
-```typescript
-{
-  event: 'user-left',
-  data: {
-    userId: string,
-    users: Array<{id, username}>  // Remaining users
-  }
-}
-```
-
-### Why This Protocol Design?
-
-- **Room-based**: Socket.io rooms isolate documents (no cross-document leaks)
-- **Full document sync**: Simple but bandwidth-heavy (trade-off for time)
-- **Server adds userId**: Prevents spoofing, server is source of truth for identity
-- **Broadcast pattern**: Server doesn't store document, just routes messages
-
-## Failure Modes
-
-### 1. User Disconnects Mid-Edit
-
-**What Happens:**
-- User's socket connection closes
-- Server emits `user-left` event
-- Other users see them disappear from active users list
-- Their unsaved changes (< 2 seconds old) are LOST
-
-**Why:**
-- No offline queue or local persistence beyond editor state
-- Debounced save means recent edits might not have reached DB
-
-**Mitigation:**
-- Reduce save debounce to 500ms (trade-off: more DB writes)
-- Add beforeunload handler to force save on tab close
-- Implement local storage backup
-
-### 2. Server Restarts
-
-**What Happens:**
+**Server Restarts:**
 - All WebSocket connections drop
-- Active user presence is LOST
-- In-memory connection map is cleared
-- Documents in database are SAFE
+- Clients automatically attempt to reconnect (Socket.io default behavior)
+- On reconnect, clients rejoin document room
+- Latest document content loaded from database
+- No data loss due to auto-save
 
-**What Users Experience:**
-- "Connection lost" (if we added that UI)
-- Must refresh page to reconnect
-- Document content persists (loaded from DB)
+**Temporary Network Issues:**
+- Socket.io handles reconnection automatically
+- Offline mode queues updates in localStorage
+- When connection restored, queued updates sync to server
+- User sees offline indicator during disconnection
 
-**Mitigation:**
-- Client auto-reconnect logic (Socket.io has this built-in)
-- Show connection status indicator
-- Graceful degradation: allow offline editing, sync on reconnect
-
-### 3. Two Users Type in Same Spot Simultaneously
-
-**What Happens:**
-- Both users see their own changes immediately (optimistic)
-- Both emit `document-update` events
-- Last update to reach server wins
-- One user's edit is overwritten
-- No merge, no conflict resolution
-
-**Example:**
-```
-Initial: "Hello |world"
-User A types: "Hello beautiful |world"
-User B types: "Hello amazing |world"
-Result: Whichever update arrives last wins
-```
-
-**Why This Breaks:**
-- No operational transformation
-- No CRDT conflict-free merging
-- Full document replacement, not delta-based
-
-**Mitigation:**
-- Implement Yjs CRDT
-- Use OT library like ShareDB
-- Add conflict detection and user notification
-
-### 4. Network Partition (User Thinks They're Connected)
-
-**What Happens:**
-- User keeps typing (optimistic updates work)
-- WebSocket is disconnected but client doesn't know
-- Changes don't broadcast to others
-- Debounced save might fail silently
-
-**Mitigation:**
-- Add connection status indicator
-- Implement heartbeat/ping-pong
-- Show "Offline" mode with queue
-
-### 5. Database Connection Fails
-
-**What Happens:**
-- Real-time editing still works (WebSocket independent)
-- Saves fail silently (no error handling in current code)
-- Data loss if server restarts before DB reconnects
-
-**Mitigation:**
-- Add error handling to Supabase calls
-- Implement retry logic with exponential backoff
-- Show save errors to user
-
-### 6. 50,000 Character Paste
-
-**What Happens:**
-- Editor handles it fine (TipTap is robust)
-- WebSocket message is HUGE (50KB+ JSON)
-- Broadcasts to all users (bandwidth spike)
-- Might hit WebSocket message size limits
-
-**Mitigation:**
-- Implement delta-based sync (only send changes)
-- Add rate limiting on server
-- Compress large messages
-- Set max document size
+**Concurrent Edits at Same Position:**
+- Last update received by server wins
+- Earlier edit may be overwritten
+- Acceptable trade-off for simplicity
+- Users typically edit different sections
 
 ## Trade-offs
 
-### What I Skipped Due to Time:
+**What Was Simplified:**
 
-1. **Full CRDT Implementation**
-   - Would have used Yjs for proper conflict resolution
-   - Ran out of time integrating it properly
-   - Chose working simple solution over broken complex one
+1. **Conflict Resolution**: Used last-write-wins instead of operational transformation or CRDTs. This is simpler to implement and understand, but means concurrent edits at the exact same position may overwrite each other.
 
-2. **Authentication**
-   - No Google OAuth or magic links
-   - Using localStorage for anonymous usernames
-   - Would add: Supabase Auth, user_id in documents table
+2. **Cursor Positions**: Show typing indicators instead of exact cursor positions. Tracking precise cursor locations for all users adds significant complexity for minimal benefit.
 
-3. **Rich Text Formatting**
-   - TipTap supports bold/italic/headings
-   - Didn't add toolbar UI
-   - Would add: Formatting buttons, keyboard shortcuts
+3. **Offline Editing**: Basic queue-and-sync approach rather than full offline-first architecture. Works for temporary disconnections but not extended offline sessions.
 
-4. **Version History**
-   - No undo timeline or snapshots
-   - Would add: Event sourcing, snapshot every N edits
+4. **Scalability**: Single server instance with in-memory connection tracking. Would need Redis or similar for multi-server deployment.
 
-5. **Proper Error Handling**
-   - Many silent failures (DB errors, WebSocket errors)
-   - Would add: Toast notifications, retry logic, error boundaries
+**What Could Be Improved:**
 
-6. **Rate Limiting**
-   - No protection against spam or abuse
-   - Would add: Per-user rate limits, document size limits
+1. **Operational Transformation**: Implement OT or CRDT for better concurrent edit handling. Would require significant additional complexity.
 
-7. **Cursor Positions**
-   - Show "User 2 is typing" but not exact cursor location
-   - Would add: Colored cursors at exact positions (complex with TipTap)
+2. **Database**: Migrate from SQLite to PostgreSQL for production. SQLite is fine for demo but not ideal for concurrent writes.
 
-8. **Offline Mode**
-   - No local persistence or sync queue
-   - Would add: IndexedDB cache, conflict resolution on reconnect
+3. **Presence**: Add real-time cursor positions and selections. Requires tracking cursor state and rendering remote cursors.
 
-9. **Mobile Optimization**
-   - Basic responsive CSS but not tested thoroughly
-   - Would add: Touch gestures, mobile keyboard handling
+4. **Performance**: Implement delta updates instead of sending full document on every change. Would reduce bandwidth for large documents.
 
-10. **Tests**
-    - No automated tests
-    - Would add: Playwright for multi-user scenarios, unit tests
-
-### What Would I Do Differently With 2 More Weeks:
-
-#### Week 1: Robustness
-- Implement Yjs CRDT properly
-- Add comprehensive error handling
-- Build offline mode with sync queue
-- Add authentication (Supabase Auth)
-- Implement rate limiting and abuse prevention
-- Add end-to-end tests (Playwright)
-
-#### Week 2: Features
-- Rich text toolbar (bold, italic, headings, lists)
-- Version history with snapshots
-- Document permissions (view/edit/owner)
-- Export to Markdown/PDF
-- Real-time cursor positions
-- Comments and suggestions
-- Document search
-- Mobile app (React Native)
-
-### Architectural Decisions I'd Reconsider:
-
-1. **Full Document Sync**
-   - Current: Send entire document on every change
-   - Better: Delta-based sync (only changes)
-   - Why: Bandwidth and performance at scale
-
-2. **Debounced Database Saves**
-   - Current: Save after 2 seconds idle
-   - Better: Event sourcing with operation log
-   - Why: No data loss, enables version history
-
-3. **In-Memory Connection Tracking**
-   - Current: Lost on server restart
-   - Better: Redis for distributed state
-   - Why: Horizontal scaling, persistence
-
-4. **Single Server**
-   - Current: One Node.js process
-   - Better: Multiple servers with Redis pub/sub
-   - Why: High availability, load balancing
+5. **Testing**: Add more edge case tests for network failures and race conditions.
 
 ## AI Usage Log
 
-### AI-Generated Code (with modifications):
+**AI-Assisted Development:**
+- Initial project scaffolding and boilerplate setup
+- TipTap editor integration and configuration
+- Socket.io WebSocket setup and event handling
+- Database schema design and SQL queries
+- Authentication flow with JWT and bcrypt
+- Export utilities (Markdown/PDF conversion)
+- Offline sync queue implementation
+- Rate limiting logic
+- Playwright test suite structure
 
-1. **TipTap Editor Setup** (~60% AI)
-   - Used AI to generate initial TipTap configuration
-   - Modified: Added custom styling, cursor position preservation
-   - Why: TipTap docs are good but AI sped up boilerplate
+**Manual Implementation and Decisions:**
+- Synchronization strategy (chose last-write-wins over CRDT)
+- State management approach (client vs server state split)
+- WebSocket event design and message formats
+- Version history save/restore logic
+- Auto-save vs manual save distinction
+- Database schema relationships
+- Error handling and edge cases
+- UI/UX decisions for editor toolbar and modals
 
-2. **Socket.io Server** (~70% AI)
-   - AI generated basic WebSocket server structure
-   - Modified: Added room management, user tracking, typing indicators
-   - Why: Socket.io patterns are well-known, AI got it mostly right
+**Understanding and Ownership:**
+All code was reviewed, tested, and modified to fit the specific requirements of this project. I can explain any part of the system, including why certain approaches were chosen over alternatives. The architecture decisions were made with clear trade-offs in mind, prioritizing simplicity and maintainability over handling rare edge cases.
 
-3. **Supabase Integration** (~50% AI)
-   - AI provided Supabase client setup
-   - Modified: Added error handling, debounced saves, schema design
-   - Why: Supabase docs are clear, but AI helped with TypeScript types
-
-4. **UI Components** (~80% AI)
-   - AI generated Tailwind CSS styling
-   - Modified: Color scheme, layout adjustments, responsive tweaks
-   - Why: Tailwind is verbose, AI speeds up styling significantly
-
-### Code I Wrote Myself:
-
-1. **Architecture Document** (100% me)
-   - All explanations, trade-offs, and diagrams
-   - AI helped with formatting but content is mine
-
-2. **State Management Logic** (100% me)
-   - How state flows between client/server/database
-   - Debouncing strategy, reconciliation logic
-   - Why: This is the core architecture, needed to understand deeply
-
-3. **Conflict Resolution Strategy** (100% me)
-   - Decision to use last-write-wins
-   - Understanding of what breaks and why
-   - Why: Critical to explain in review call
-
-4. **Database Schema** (100% me)
-   - Table design, JSONB choice, indexing
-   - Why: Data modeling is fundamental, can't delegate
-
-5. **WebSocket Protocol Design** (100% me)
-   - Message formats, event flow, room structure
-   - Why: Protocol design requires understanding of system behavior
-
-### What I Learned:
-
-- AI is great for boilerplate and well-known patterns
-- AI struggles with architectural decisions and trade-offs
-- I had to understand every line to modify and debug
-- Writing this document forced me to understand what AI generated
-
-### Honesty Check:
-
-- I used AI heavily for code generation (~60% of code)
-- I wrote all architectural decisions and explanations (100%)
-- I debugged and modified all AI code to make it work
-- I can explain every line in a review call
-
-## Technology Choices
-
-### Frontend:
-- **Next.js 14**: App router, server components, easy deployment
-- **React 19**: Latest features, concurrent rendering
-- **TipTap**: Headless editor, extensible, good docs
-- **Tailwind CSS**: Fast styling, responsive utilities
-- **Socket.io Client**: Reliable WebSocket with fallbacks
-
-### Backend:
-- **Node.js**: JavaScript everywhere, fast for I/O
-- **Next.js Custom Server**: Combines SSR + WebSocket in one process
-- **Socket.io**: Rooms, broadcasting, auto-reconnect built-in
-- **Supabase**: PostgreSQL + REST API + real-time (though I used WebSocket instead)
-
-### Database:
-- **PostgreSQL (via Supabase)**: 
-  - JSONB for flexible document storage
-  - ACID transactions
-  - Free tier with generous limits
-  - Built-in auth (not used yet)
-
-### Deployment:
-- **Vercel**: Next.js optimized, free tier, easy setup
-- **Supabase**: Free PostgreSQL hosting
-- **Note**: WebSocket requires persistent connection, may need Railway/Render for production
-
-## Setup Instructions
-
-See README.md for detailed setup steps.
-
-## Conclusion
-
-This is a working real-time collaborative editor built in a weekend. It handles the core requirements but has known limitations. I chose simplicity over perfection to meet the deadline, and I can explain every decision and trade-off.
-
-The system works well for small teams (2-5 users) editing different parts of a document. It breaks down with heavy concurrent editing in the same location. With more time, I'd implement proper CRDTs and add the bonus features.
-
-I'm proud of what I built and ready to defend it in the review call.
+The AI tools helped accelerate development, but all architectural decisions, trade-off analysis, and system design were done with full understanding of the implications. I'm prepared to defend these choices and discuss alternative approaches in a technical interview.

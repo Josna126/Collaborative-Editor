@@ -1,27 +1,55 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Editor from '@/components/Editor';
 
 export default function DocumentPage() {
   const params = useParams();
+  const router = useRouter();
   const documentId = params.id as string;
-  const [username, setUsername] = useState('');
+  const [user, setUser] = useState<any>(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    // Get or create username
-    let storedUsername = localStorage.getItem('username');
-    if (!storedUsername) {
-      storedUsername = `User ${Math.random().toString(36).substring(2, 6)}`;
-      localStorage.setItem('username', storedUsername);
-    }
-    setUsername(storedUsername);
-    setIsReady(true);
-  }, []);
+    // Check authentication
+    const checkAuth = async () => {
+      const token = localStorage.getItem('auth_token');
+      const userStr = localStorage.getItem('user');
 
-  if (!isReady) {
+      if (!token || !userStr) {
+        router.push('/auth');
+        return;
+      }
+
+      try {
+        // Verify token
+        const response = await fetch('/api/auth/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+
+        if (!response.ok) {
+          localStorage.removeItem('auth_token');
+          localStorage.removeItem('user');
+          router.push('/auth');
+          return;
+        }
+
+        const data = await response.json();
+        setUser(data.user);
+        setIsReady(true);
+      } catch (err) {
+        console.error('Auth check failed:', err);
+        router.push('/auth');
+      }
+    };
+
+    checkAuth();
+  }, [router]);
+
+  if (!isReady || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
@@ -32,5 +60,8 @@ export default function DocumentPage() {
     );
   }
 
-  return <Editor documentId={documentId} username={username} />;
+  const fullName = user.full_name || 'User';
+  const email = user.email || '';
+
+  return <Editor documentId={documentId} fullName={fullName} email={email} userId={user.id} />;
 }
